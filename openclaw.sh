@@ -905,6 +905,41 @@ PY
 
 		echo
 		local cliproxy_dir; cliproxy_dir=$(_cliproxy_dir)
+
+		local mode_input="" proj_input=""
+		if [[ "$login_cmd" == "--login" ]]; then
+			local mode_choice
+			mode_choice=$(gum choose --cursor "❯ " \
+				--header $'  选择 Gemini 登录模式\n  ↑↓ 移动 · Enter 确认' \
+				"Code Assist（GCP 项目，手动选择）" \
+				"Google One（个人账号，自动发现项目）") || return 0
+			[[ "$mode_choice" == "Code Assist"* ]] && mode_input="1" || mode_input="2"
+
+			if [[ "$mode_input" == "1" ]]; then
+				echo
+				local proj_list proj_choice proj_num="1"
+				if command -v gcloud &>/dev/null; then
+					proj_list=$(gcloud projects list --format="value(projectId,name)" 2>/dev/null)
+				fi
+				if [[ -n "$proj_list" ]]; then
+					proj_choice=$(printf "%s\n" "$proj_list" | \
+						gum choose --cursor "❯ " \
+						--header $'  选择 GCP 项目\n  ↑↓ 移动 · Enter 确认') || return 0
+					proj_num=$(printf "%s\n" "$proj_list" | \
+						awk -v sel="$proj_choice" 'NR==sel_line || $0==sel {print NR; exit}' \
+						sel="$proj_choice" 2>/dev/null || echo "1")
+					[[ -z "$proj_num" || "$proj_num" == "0" ]] && proj_num="1"
+				else
+					local proj_raw
+					proj_raw=$(gum input \
+						--placeholder "项目编号或直接按 Enter 使用默认(1)" \
+						--prompt "  ❯ " --width 60) || return 0
+					proj_num="${proj_raw:-1}"
+				fi
+				proj_input="$proj_num"
+			fi
+		fi
+
 		if [[ -n "$login_port" ]]; then
 			if is_macos; then
 				gum style \
@@ -915,7 +950,11 @@ PY
 				gum style --bold --foreground 240 \
 					"  浏览器将自动打开，完成授权后自动返回，请稍候..."
 				echo
-				"$cliproxy_bin" "$login_cmd"
+				if [[ -n "$mode_input" ]]; then
+					printf "%s\n%s\n" "$mode_input" "$proj_input" | "$cliproxy_bin" "$login_cmd"
+				else
+					"$cliproxy_bin" "$login_cmd"
+				fi
 			else
 				gum style \
 					--border double --border-foreground 51 \
@@ -932,8 +971,21 @@ PY
 					"  ⚡ 无需端口转发 — 回调 URL 里已含 code，直接转发给本机处理"
 				echo
 
-				(cd "$cliproxy_dir" && "$cliproxy_bin" "$login_cmd" --no-browser) &
-				local cli_pid=$!
+				if [[ -n "$mode_input" ]]; then
+					local fifo; fifo=$(mktemp -u /tmp/cp_login_XXXXXX)
+					mkfifo "$fifo"
+					(cd "$cliproxy_dir" && "$cliproxy_bin" "$login_cmd" --no-browser < "$fifo") &
+					local cli_pid=$!
+					exec 9>"$fifo"
+					printf "%s\n" "$mode_input" >&9
+					sleep 0.3
+					[[ -n "$proj_input" ]] && { printf "%s\n" "$proj_input" >&9; sleep 0.3; }
+					exec 9>&-
+					rm -f "$fifo"
+				else
+					(cd "$cliproxy_dir" && "$cliproxy_bin" "$login_cmd" --no-browser) &
+					local cli_pid=$!
+				fi
 				sleep 2
 
 				echo
@@ -2096,25 +2148,32 @@ PYTHON_EOF
 			gum style --foreground 240 "当前已安装插件:"
 			openclaw plugins list
 			echo
-			gum style --bold --foreground 99 "常用插件参考:"
-			printf "  \033[96m%-20s\033[0m  %s\n" "feishu"         "飞书/Lark 集成"
-			printf "  \033[96m%-20s\033[0m  %s\n" "telegram"       "Telegram 机器人"
-			printf "  \033[96m%-20s\033[0m  %s\n" "slack"          "Slack 企业通讯"
-			printf "  \033[96m%-20s\033[0m  %s\n" "msteams"        "Microsoft Teams"
-			printf "  \033[96m%-20s\033[0m  %s\n" "discord"        "Discord 社区管理"
-			printf "  \033[96m%-20s\033[0m  %s\n" "whatsapp"       "WhatsApp 自动化"
-			printf "  \033[96m%-20s\033[0m  %s\n" "memory-core"    "基础记忆 (文件检索)"
-			printf "  \033[96m%-20s\033[0m  %s\n" "memory-lancedb" "增强记忆 (向量数据库)"
-			printf "  \033[96m%-20s\033[0m  %s\n" "copilot-proxy"  "Copilot 接口转发"
-			printf "  \033[96m%-20s\033[0m  %s\n" "lobster"        "审批流 (带人工确认)"
-			printf "  \033[96m%-20s\033[0m  %s\n" "voice-call"     "语音通话能力"
-			printf "  \033[96m%-20s\033[0m  %s\n" "nostr"          "加密隐私聊天"
-			echo
 
 			local raw_input
-			raw_input=$(gum input \
-				--placeholder "插件 ID (留空退出)" \
-				--prompt "Plugin > ")
+			raw_input=$(gum choose --cursor "❯ " \
+				--header $'  选择要安装的插件\n  ↑↓ 移动 · Enter 确认 · / 搜索 · q 退出' \
+				"feishu         飞书/Lark 集成" \
+				"telegram       Telegram 机器人" \
+				"slack          Slack 企业通讯" \
+				"msteams        Microsoft Teams" \
+				"discord        Discord 社区管理" \
+				"whatsapp       WhatsApp 自动化" \
+				"memory-core    基础记忆 (文件检索)" \
+				"memory-lancedb 增强记忆 (向量数据库)" \
+				"copilot-proxy  Copilot 接口转发" \
+				"lobster        审批流 (带人工确认)" \
+				"voice-call     语音通话能力" \
+				"nostr          加密隐私聊天" \
+				"手动输入插件 ID") || break
+
+			if [[ "$raw_input" == "手动输入插件 ID" ]]; then
+				raw_input=$(gum input \
+					--placeholder "插件 ID (留空退出)" \
+					--prompt "Plugin > ") || break
+				[[ -z "$raw_input" ]] && break
+			else
+				raw_input=$(echo "$raw_input" | awk '{print $1}')
+			fi
 			[[ -z "$raw_input" ]] && break
 
 			local plugin_id plugin_full
@@ -2163,25 +2222,32 @@ PYTHON_EOF
 			gum style --foreground 240 "当前已安装技能:"
 			openclaw skills list
 			echo
-			gum style --bold --foreground 99 "推荐技能参考:"
-			printf "  \033[96m%-22s\033[0m  %s\n" "github"          "管理 GitHub Issues/PR/CI"
-			printf "  \033[96m%-22s\033[0m  %s\n" "notion"          "操作 Notion 页面与数据库"
-			printf "  \033[96m%-22s\033[0m  %s\n" "apple-notes"     "macOS 原生笔记管理"
-			printf "  \033[96m%-22s\033[0m  %s\n" "apple-reminders" "macOS 提醒事项管理"
-			printf "  \033[96m%-22s\033[0m  %s\n" "1password"       "自动化读取 1Password 密钥"
-			printf "  \033[96m%-22s\033[0m  %s\n" "gog"             "Google Workspace 全能助手"
-			printf "  \033[96m%-22s\033[0m  %s\n" "things-mac"      "Things 3 任务管理"
-			printf "  \033[96m%-22s\033[0m  %s\n" "bluebubbles"     "通过 BlueBubbles 收发 iMessage"
-			printf "  \033[96m%-22s\033[0m  %s\n" "himalaya"        "终端邮件管理 (IMAP/SMTP)"
-			printf "  \033[96m%-22s\033[0m  %s\n" "summarize"       "网页/播客/YouTube 内容总结"
-			printf "  \033[96m%-22s\033[0m  %s\n" "openai-whisper"  "本地音频转文字"
-			printf "  \033[96m%-22s\033[0m  %s\n" "coding-agent"    "运行 Claude Code/Codex 等编程助手"
-			echo
 
 			local skill_name
-			skill_name=$(gum input \
-				--placeholder "技能名称 (留空退出)" \
-				--prompt "Skill > ")
+			skill_name=$(gum choose --cursor "❯ " \
+				--header $'  选择要安装的技能\n  ↑↓ 移动 · Enter 确认 · / 搜索 · q 退出' \
+				"github          管理 GitHub Issues/PR/CI" \
+				"notion          操作 Notion 页面与数据库" \
+				"apple-notes     macOS 原生笔记管理" \
+				"apple-reminders macOS 提醒事项管理" \
+				"1password       自动化读取 1Password 密钥" \
+				"gog             Google Workspace 全能助手" \
+				"things-mac      Things 3 任务管理" \
+				"bluebubbles     通过 BlueBubbles 收发 iMessage" \
+				"himalaya        终端邮件管理 (IMAP/SMTP)" \
+				"summarize       网页/播客/YouTube 内容总结" \
+				"openai-whisper  本地音频转文字" \
+				"coding-agent    运行 Claude Code/Codex 等编程助手" \
+				"手动输入技能名称") || break
+
+			if [[ "$skill_name" == "手动输入技能名称" ]]; then
+				skill_name=$(gum input \
+					--placeholder "技能名称 (留空退出)" \
+					--prompt "Skill > ") || break
+				[[ -z "$skill_name" ]] && break
+			else
+				skill_name=$(echo "$skill_name" | awk '{print $1}')
+			fi
 			[[ -z "$skill_name" ]] && break
 
 			local skill_found=false
